@@ -13,3 +13,15 @@ __pycache__/
 
 *.log
 .DS_Store
+
+# Credentials / agent secrets
+secrets/
+credentials/
+.config/
+*.token
+*.secret
+
+# Browser/session data
+playwright/.auth/
+browser-data/
+cookies.json
