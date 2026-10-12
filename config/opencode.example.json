@@ -1,0 +1,20 @@
+{
+  // Copy to ~/.config/opencode/opencode.json and adjust to your needs.
+  // MCP servers below are DISABLED examples only - enable one explicitly
+  // and only when you need it. Never store tokens or credentials in this file.
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "filesystem-example": {
+      "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/absolute/path/to/allowed/working/dir"],
+      "enabled": false
+    },
+    "fetch-example": {
+      "command": ["npx", "-y", "@modelcontextprotocol/server-everything"],
+      "enabled": false
+    }
+  },
+  "permission": {
+    "edit": "ask",
+    "bash": "ask"
+  }
+}

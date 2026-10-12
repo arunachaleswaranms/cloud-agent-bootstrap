@@ -1,0 +1,7 @@
+# Security/recon tools for AUTHORIZED bug-bounty / VDP testing only.
+# Installed to $(go env GOPATH)/bin by scripts/install-security-tools.sh
+# (opt-in via INSTALL_SECURITY_TOOLS=1). Pins are compatible with Go 1.22.
+github.com/ffuf/ffuf/v2@v2.1.0
+github.com/projectdiscovery/httpx/cmd/httpx@v1.6.10
+github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v3.3.9
+github.com/projectdiscovery/subfinder/v2/cmd/subfinder@v2.6.7

@@ -1,0 +1,5 @@
+# Global npm packages (pinned). Installed by scripts/install-opencode.sh
+# and scripts/install-playwright.sh so each installer stays self-contained
+# and idempotent. Keep versions in sync with those scripts.
+opencode-ai@1.18.35
+playwright@1.64.0

@@ -1,27 +1,79 @@
+# --- Environment / secrets ---------------------------------------------------
 .env
+.env.*
 *.env
+.envrc
+.env.local
 secrets.env
+config/secrets.env
+auth.json
+credentials.json
+*.token
+*.secret
 *.key
 *.pem
 *.p12
 *.pfx
+*.ppk
+id_rsa*
+id_ed25519*
+id_ecdsa*
+id_dsa*
+*.auth
 
+secrets/
+credentials/
+.gcloud/
+.aws/
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# --- OpenCode ----------------------------------------------------------------
+.opencode/
+opencode.json
+auth.json
+
+# --- Node / npm --------------------------------------------------------------
 node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# --- Python ------------------------------------------------------------------
 .venv/
 venv/
 __pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+pip-wheel-metadata/
 
-*.log
-.DS_Store
-
-# Credentials / agent secrets
-secrets/
-credentials/
-.config/
-*.token
-*.secret
-
-# Browser/session data
-playwright/.auth/
+# --- Browser / session data --------------------------------------------------
 browser-data/
+playwright/.auth/
+.cookies/
 cookies.json
+*.sqlite
+*.sqlite3
+*.session
+
+# --- Editors / OS ------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+
+# --- Logs / runtime state ----------------------------------------------------
+*.log
+logs/
+tmp/
+*.pid
+
+# --- Tailscale ---------------------------------------------------------------
+.tailscale/
