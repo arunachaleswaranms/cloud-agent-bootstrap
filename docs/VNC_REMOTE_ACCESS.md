@@ -52,35 +52,35 @@ If port 5901 is not bound:
 vncserver :1 -localhost yes
 ```
 
-## Google Cloud IAP SSH port forwarding
+## Google Cloud IAP SSH tunnel (single-hop)
 
-From the MacBook, create an IAP tunnel:
+From the MacBook, the `scripts/macbook-vnc-launcher.sh` script creates a
+single-hop IAP tunnel that forwards the remote VNC port directly:
 
 ```bash
-gcloud compute ssh agent-vm \
+gcloud compute ssh <instance> \
   --project=<project> \
   --zone=<zone> \
   --tunnel-through-iap \
-  --ssh-flag="-L 2222:localhost:22" \
-  --ssh-flag="-N"
+  --ssh-flag="-N" \
+  --ssh-flag=-L"5901:127.0.0.1:5901" \
+  --ssh-flag="-o ServerAliveInterval=30" \
+  --ssh-flag="-o ServerAliveCountMax=3" \
+  --ssh-flag="-o ExitOnForwardFailure=yes"
 ```
 
-This forwards local port 2222 to the VM's SSH port through IAP.
+This forwards local port 5901 to the VM's VNC port through IAP in a
+single SSH connection. No second SSH hop is needed.
 
-Then forward VNC through the tunnel:
-
-```bash
-ssh -p 2222 -L 5901:localhost:5901 agent-vm@localhost -N
-```
-
-Or use the provided launcher script (see below).
+The tunnel binds to localhost only. SSH identity verification is
+preserved (no `StrictHostKeyChecking=no`).
 
 ## Reconnecting after MacBook sleep or restart
 
 1. Verify the VM is reachable:
 
    ```bash
-   gcloud compute instances describe agent-vm --format='value(status)'
+   gcloud compute instances describe <instance> --format='value(status)'
    ```
 
 2. Re-establish the IAP tunnel (it may have dropped):
@@ -89,15 +89,13 @@ Or use the provided launcher script (see below).
    scripts/macbook-vnc-launcher.sh
    ```
 
-3. Open Screen Sharing:
-
-   ```
-   vnc://localhost:5901
-   ```
+3. Open Screen Sharing (the launcher does this automatically after the
+   forward is ready).
 
 ## Opening macOS Screen Sharing
 
-From the terminal:
+The launcher opens Screen Sharing automatically after the tunnel is
+ready. To open manually:
 
 ```bash
 open "vnc://localhost:5901"
@@ -121,15 +119,31 @@ them:
 ```bash
 export GCP_PROJECT="your-project"
 export GCP_ZONE="us-central1-a"
-export GCP_INSTANCE="agent-vm"
+export GCP_INSTANCE="cloud-agent"
 scripts/macbook-vnc-launcher.sh
 ```
 
-To stop the tunnels:
+The launcher:
+
+1. Checks for an existing tunnel (avoids duplicates).
+2. Creates the IAP tunnel with VNC port forwarding.
+3. Waits for the local port to accept connections.
+4. Opens Screen Sharing only after the forward is ready.
+5. Tracks its PID in `/tmp/macbook-vnc-tunnel.pid`.
+
+To stop the tunnel:
 
 ```bash
 scripts/macbook-vnc-launcher.sh --stop
 ```
+
+The stop command terminates only the tunnel process identified by the
+tracked PID. It does not terminate unrelated SSH or Screen Sharing
+sessions.
+
+> **Note**: This script targets macOS. Shell syntax is validated on
+> Ubuntu, but macOS-specific behavior (Screen Sharing, osascript) is
+> unverified unless actually tested on macOS.
 
 ## Diagnosing IAP, SSH, and VNC failures
 
@@ -140,13 +154,13 @@ scripts/macbook-vnc-launcher.sh --stop
 | `PERMISSION_DENIED` | IAP API not enabled | `gcloud services enable iap.googleapis.com` |
 | `not authorized` | Missing IAP role | Add `roles/iap.tunnelResourceAccessor` |
 | Tunnel drops | Idle timeout | Use `ServerAliveInterval=30` |
+| `Host key verification failed` | VM recreated | Remove old key from `~/.ssh/known_hosts` |
 
 ### SSH fails
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `Connection refused` | sshd not running | `sudo systemctl start ssh` |
-| `Host key verification failed` | VM recreated | Remove old key from `~/.ssh/known_hosts` |
 | `Permission denied (publickey)` | Key not in metadata | Add key via `gcloud compute instances add-metadata` |
 
 ### VNC fails

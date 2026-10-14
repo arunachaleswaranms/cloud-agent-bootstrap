@@ -14,7 +14,7 @@
 #
 # Environment overrides:
 #   BURP_JAR       path to burpsuite_desktop_v*.jar
-#   BURP_JAVA      path to java binary
+#   BURP_JAVA      path to java binary (default: prefer Java 25)
 #   BURP_DISPLAY   X display to use (default: :1)
 #   BURP_XMX       heap size (default: 3g)
 #   BURP_LOG_DIR   runtime log directory (default: ~/.local/state/burp)
@@ -23,7 +23,6 @@ set -euo pipefail
 
 BURP_HOME="${BURP_HOME:-$HOME/tools/burp}"
 BURP_JAR="${BURP_JAR:-$BURP_HOME/burpsuite_desktop_v2026.9.1.jar}"
-BURP_JAVA="${BURP_JAVA:-$(command -v java || true)}"
 BURP_DISPLAY="${BURP_DISPLAY:-:1}"
 BURP_XMX="${BURP_XMX:-3g}"
 BURP_LOG_DIR="${BURP_LOG_DIR:-$HOME/.local/state/burp}"
@@ -33,21 +32,76 @@ log()  { echo "[+] $*"; }
 warn() { echo "[!] $*" >&2; }
 die()  { echo "[ERROR] $*" >&2; exit 1; }
 
-# --- 1. Check for existing instance -----------------------------------------
+# --- 1. Resolve Java (prefer verified Java 25) --------------------------------
+resolve_java() {
+    if [ -n "${BURP_JAVA:-}" ] && [ -x "${BURP_JAVA:-}" ]; then
+        echo "$BURP_JAVA"
+        return 0
+    fi
+    # Prefer Java 25 (validated runtime)
+    for candidate in \
+        /usr/lib/jvm/java-25-openjdk-amd64/bin/java \
+        "$(command -v java 2>/dev/null || true)"
+    do
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            local ver
+            ver="$("$candidate" -version 2>&1 | head -1 | sed 's/.*version "\([^"]*\)".*/\1/')"
+            case "$ver" in
+                25.*) echo "$candidate"; return 0 ;;
+            esac
+        fi
+    done
+    # Fall back to any available Java
+    if command -v java >/dev/null 2>&1; then
+        command -v java
+        return 0
+    fi
+    return 1
+}
+
+# --- 2. Verify a PID is actually our Burp process -----------------------------
+is_our_burp() {
+    local pid="$1"
+    kill -0 "$pid" 2>/dev/null || return 1
+    # Verify the process command line matches our Burp JAR
+    local cmdline
+    cmdline="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    [ -n "$cmdline" ] || return 1
+    # Check that the JAR path in the process matches our configured JAR
+    echo "$cmdline" | grep -qF "$BURP_JAR" && return 0
+    # Also accept the generic pattern for the versioned JAR
+    echo "$cmdline" | grep -q "burpsuite_desktop_v.*\.jar" && return 0
+    return 1
+}
+
+# --- 3. Check for existing instance -------------------------------------------
 existing_pid() {
+    # Check PID file first
     if [ -f "$BURP_PID_FILE" ]; then
         local pid
         pid="$(cat "$BURP_PID_FILE" 2>/dev/null || true)"
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if [ -n "$pid" ] && is_our_burp "$pid"; then
             echo "$pid"
             return 0
         fi
+        # Stale PID file — the process isn't our Burp (or doesn't exist)
+        # Do NOT kill it; just clean up our own bookkeeping
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            warn "PID file references PID $pid but it is not our Burp process — ignoring"
+        fi
+        rm -f "$BURP_PID_FILE"
     fi
     # Fallback: scan process table for the Burp jar
-    pgrep -f "burpsuite_desktop_v.*\.jar" 2>/dev/null | head -1 || true
+    local found
+    found="$(pgrep -f "burpsuite_desktop_v.*\.jar" 2>/dev/null | head -1 || true)"
+    if [ -n "$found" ]; then
+        echo "$found"
+        return 0
+    fi
+    return 1
 }
 
-# --- 2. Verify prerequisites --------------------------------------------------
+# --- 4. Verify prerequisites --------------------------------------------------
 check_prereqs() {
     local missing=0
 
@@ -56,17 +110,22 @@ check_prereqs() {
         missing=1
     fi
 
-    if [ -z "$BURP_JAVA" ] || [ ! -x "$BURP_JAVA" ]; then
+    local java_bin
+    if ! java_bin="$(resolve_java)"; then
         warn "Java runtime not found. Install OpenJDK 25: sudo apt install openjdk-25-jre"
         missing=1
     else
         local jver
-        jver="$("$BURP_JAVA" -version 2>&1 | head -1)"
-        log "Java: $jver"
-    fi
-
-    if [ -n "${DISPLAY:-}" ] && [ "$DISPLAY" != "$BURP_DISPLAY" ]; then
-        warn "Current DISPLAY=$DISPLAY differs from target $BURP_DISPLAY"
+        jver="$("$java_bin" -version 2>&1 | head -1)"
+        local ver_num
+        ver_num="$(echo "$jver" | sed 's/.*version "\([^"]*\)".*/\1/' | cut -d. -f1)"
+        if [ "$ver_num" -ge 17 ] 2>/dev/null; then
+            log "Java: $jver"
+            BURP_JAVA="$java_bin"
+        else
+            warn "Java $ver_num too old; Burp requires Java 17+ (validated: 25)"
+            missing=1
+        fi
     fi
 
     if ! DISPLAY="$BURP_DISPLAY" xdpyinfo >/dev/null 2>&1; then
@@ -79,11 +138,10 @@ check_prereqs() {
     [ "$missing" -eq 0 ] || die "Prerequisite check failed. Fix the warnings above and retry."
 }
 
-# --- 3. Status command --------------------------------------------------------
+# --- 5. Status command --------------------------------------------------------
 cmd_status() {
     local pid
-    pid="$(existing_pid)"
-    if [ -n "$pid" ]; then
+    if pid="$(existing_pid)"; then
         log "Burp is running (PID $pid)"
         log "  JAR:    $BURP_JAR"
         log "  Log:    $BURP_LOG_DIR/burp.log"
@@ -96,14 +154,19 @@ cmd_status() {
     fi
 }
 
-# --- 4. Stop command ----------------------------------------------------------
+# --- 6. Stop command ----------------------------------------------------------
 cmd_stop() {
     local pid
-    pid="$(existing_pid)"
-    if [ -z "$pid" ]; then
+    if ! pid="$(existing_pid)"; then
         warn "No running Burp instance found"
         return 0
     fi
+
+    # Extra safety: verify one more time before killing
+    if ! is_our_burp "$pid"; then
+        die "Refusing to kill PID $pid — process identity mismatch"
+    fi
+
     log "Stopping Burp (PID $pid)..."
     kill "$pid" 2>/dev/null || true
     for _ in $(seq 1 15); do
@@ -118,11 +181,10 @@ cmd_stop() {
     log "Burp stopped"
 }
 
-# --- 5. Start command ---------------------------------------------------------
+# --- 7. Start command ---------------------------------------------------------
 cmd_start() {
     local pid
-    pid="$(existing_pid)"
-    if [ -n "$pid" ]; then
+    if pid="$(existing_pid)"; then
         log "Burp is already running (PID $pid) — not starting a duplicate"
         cmd_status
         return 0
@@ -136,6 +198,7 @@ cmd_start() {
     local logfile="$BURP_LOG_DIR/burp.log"
     log "Starting Burp Suite..."
     log "  JAR:    $BURP_JAR"
+    log "  Java:   $BURP_JAVA"
     log "  Heap:   $BURP_XMX"
     log "  Display: $BURP_DISPLAY"
     log "  Log:    $logfile"
@@ -153,9 +216,11 @@ cmd_start() {
     local waited=0
     while [ "$waited" -lt 60 ]; do
         if ! kill -0 "$new_pid" 2>/dev/null; then
+            # Process died — clean up PID file and report
+            rm -f "$BURP_PID_FILE"
             die "Burp process exited during startup. Check log: $logfile"
         fi
-        if ss -tlnH 2>/dev/null | grep -q '127.0.0.1:8080'; then
+        if ss -tlnH 2>/dev/null | grep -qE "(127\.0\.0\.1|\[::ffff:127\.0\.0\.1\]):8080\b"; then
             log "Burp proxy is listening on 127.0.0.1:8080"
             log "Burp is ready. Connect via VNC (display :1) or IAP SSH tunnel."
             return 0
@@ -171,9 +236,9 @@ cmd_start() {
 
 # --- Main ---------------------------------------------------------------------
 case "${1:-start}" in
-    start)  cmd_start  ;;
-    status) cmd_status ;;
-    stop)   cmd_stop   ;;
+    start)      cmd_start  ;;
+    status|--status) cmd_status ;;
+    stop|--stop)     cmd_stop   ;;
     -h|--help|help)
         grep '^#' "$0" | sed 's/^# \{0,1\}//'
         ;;

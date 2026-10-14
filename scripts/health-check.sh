@@ -2,15 +2,31 @@
 #
 # Post-bootstrap health check for the agent VM.
 # Exits 0 when no FAILs remain; warnings do not block.
+# Default: read-only, local-only checks. Use --network-test to enable
+# external HTTPS verification through the Burp proxy.
 set -uo pipefail
 
-PASS=0; WARN=0; FAIL=0
+PASS=0; WARN=0; FAIL=0; SKIP=0
 ok()   { echo "  [OK]   $*"; PASS=$((PASS + 1)); }
 warn() { echo "  [WARN] $*"; WARN=$((WARN + 1)); }
 fail() { echo "  [FAIL] $*"; FAIL=$((FAIL + 1)); }
+skip() { echo "  [SKIP] $*"; SKIP=$((SKIP + 1)); }
 info() { echo "  [INFO] $*"; }
 
+NETWORK_TEST=0
+case "${1:-}" in
+    --network-test) NETWORK_TEST=1 ;;
+    -h|--help|help)
+        echo "Usage: $0 [--network-test]"
+        echo "  --network-test  enable external HTTPS verification through Burp proxy"
+        exit 0
+        ;;
+    "") ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+esac
+
 echo "== OS =="
+# shellcheck disable=SC1091
 if [ -r /etc/os-release ]; then . /etc/os-release; fi
 if [ "${ID:-}" = "ubuntu" ] && [ "${VERSION_ID:-}" = "24.04" ]; then
     ok "OS: ${PRETTY_NAME:-Ubuntu 24.04 LTS}"
@@ -49,6 +65,7 @@ if command -v node >/dev/null 2>&1; then
     v="$(node --version 2>/dev/null)"
     case "$v" in v22.*) ok "Node.js: $v";; *) warn "Node.js: $v (validated: 22.x)";; esac
 else warn "Node.js not installed"; fi
+# shellcheck disable=SC2015
 command -v npm >/dev/null 2>&1 && ok "npm: $(npm --version 2>/dev/null)" || warn "npm not installed"
 
 if command -v go >/dev/null 2>&1; then
@@ -68,6 +85,7 @@ if command -v opencode >/dev/null 2>&1; then
     else fail "OpenCode: $v (pinned: 1.18.35)"; fi
 else warn "OpenCode not installed (run: bash scripts/install-opencode.sh)"; fi
 
+# shellcheck disable=SC2015
 command -v tmux >/dev/null 2>&1 && ok "tmux: $(tmux -V 2>/dev/null)" || warn "tmux not installed"
 
 if command -v playwright >/dev/null 2>&1; then
@@ -93,8 +111,22 @@ fi
 
 BURP_JAR="${BURP_JAR:-$HOME/tools/burp/burpsuite_desktop_v2026.9.1.jar}"
 if [ -f "$BURP_JAR" ]; then
-    if pgrep -f "burpsuite_desktop_v.*\.jar" >/dev/null 2>&1; then
-        ok "Burp Suite: running"
+    # Verify the process is actually Burp, not just any Java process
+    burp_pids="$(pgrep -f "burpsuite_desktop_v.*\.jar" 2>/dev/null || true)"
+    if [ -n "$burp_pids" ]; then
+        # Verify at least one PID is actually running our JAR
+        burp_running=0
+        for pid in $burp_pids; do
+            if ps -p "$pid" -o command= 2>/dev/null | grep -qF "$BURP_JAR"; then
+                burp_running=1
+                break
+            fi
+        done
+        if [ "$burp_running" -eq 1 ]; then
+            ok "Burp Suite: running (PID $burp_pids)"
+        else
+            warn "Burp Suite: Java process found but JAR mismatch — check configuration"
+        fi
     else
         warn "Burp Suite: installed but not running (start with: bash scripts/start-burp.sh)"
     fi
@@ -103,21 +135,22 @@ else
 fi
 
 echo "== VNC / XFCE =="
-if pgrep -x Xtigervnc >/dev/null 2>&1; then
-    vnc_disp="$(pgrep -a Xtigervnc 2>/dev/null | grep -oP ':\d+' | head -1)"
-    ok "TigerVNC: running (display ${vnc_disp:-unknown})"
+vnc_pids="$(pgrep -x Xtigervnc 2>/dev/null || true)"
+if [ -n "$vnc_pids" ]; then
+    vnc_disp="$(ps -p "$(echo "$vnc_pids" | head -1)" -o command= 2>/dev/null | grep -oP ':\d+' | head -1)"
+    ok "TigerVNC: running (display ${vnc_disp:-unknown}, PID $(echo "$vnc_pids" | head -1))"
 else
     warn "TigerVNC: not running (start with: vncserver :1 -localhost yes)"
 fi
 
-if [ -n "${DISPLAY:-}" ] || [ -f "$HOME/.Xauthority" ]; then
+if [ -f "$HOME/.Xauthority" ]; then
     if DISPLAY=:1 xdpyinfo >/dev/null 2>&1; then
         ok "XFCE display :1: reachable"
     else
         warn "XFCE display :1: not reachable"
     fi
 else
-    info "No X display configured"
+    skip "XFCE display :1: no ~/.Xauthority found"
 fi
 
 echo "== Network ports =="
@@ -136,18 +169,22 @@ echo "== MCP connections =="
 if command -v opencode >/dev/null 2>&1; then
     mcp_output="$(opencode mcp list 2>/dev/null || true)"
     if [ -n "$mcp_output" ]; then
+        # Match MCP names precisely: look for the exact name after the status icon
         for mcp_name in "Burp" "Burp_extended" "playwright"; do
-            if echo "$mcp_output" | grep -q "✓.*${mcp_name}"; then
+            # Match "✓ Burp " or "✓ Burp_extended" with word boundary
+            if echo "$mcp_output" | grep -qE "✓[[:space:]]+${mcp_name}([[:space:]]|$)"; then
                 ok "MCP ${mcp_name}: connected"
+            elif echo "$mcp_output" | grep -qE "✗[[:space:]]+${mcp_name}([[:space:]]|$)"; then
+                fail "MCP ${mcp_name}: configured but disconnected"
             else
-                fail "MCP ${mcp_name}: not connected"
+                skip "MCP ${mcp_name}: not in configuration"
             fi
         done
     else
         warn "opencode mcp list: no output"
     fi
 else
-    info "opencode not installed; MCP check skipped"
+    skip "opencode not installed; MCP check skipped"
 fi
 
 echo "== HTTPS interception =="
@@ -170,21 +207,24 @@ else
     warn "Burp CA PEM: not found ($BURP_CA_PEM)"
 fi
 
-# Read-only HTTPS proxy verification against approved benign endpoint
-if command -v curl >/dev/null 2>&1 && [ -f "$BURP_CA_PEM" ]; then
-    https_code="$(curl -s --noproxy "" \
-        --proxy http://127.0.0.1:8080 \
-        --cacert "$BURP_CA_PEM" \
-        --max-time 15 \
-        -o /dev/null -w '%{http_code}' \
-        https://example.com/ 2>/dev/null || echo "000")"
-    if [ "$https_code" = "200" ] || [ "$https_code" = "301" ] || [ "$https_code" = "302" ]; then
-        ok "HTTPS via Burp proxy: verified (HTTP $https_code)"
+if [ "$NETWORK_TEST" -eq 1 ]; then
+    if command -v curl >/dev/null 2>&1 && [ -f "$BURP_CA_PEM" ]; then
+        https_code="$(curl -s --noproxy "" \
+            --proxy http://127.0.0.1:8080 \
+            --cacert "$BURP_CA_PEM" \
+            --max-time 15 \
+            -o /dev/null -w '%{http_code}' \
+            https://example.com/ 2>/dev/null || echo "000")"
+        if [ "$https_code" = "200" ] || [ "$https_code" = "301" ] || [ "$https_code" = "302" ]; then
+            ok "HTTPS via Burp proxy: verified (HTTP $https_code)"
+        else
+            fail "HTTPS via Burp proxy: failed (HTTP $https_code)"
+        fi
     else
-        fail "HTTPS via Burp proxy: failed (HTTP $https_code)"
+        skip "curl or Burp CA not available; HTTPS check skipped"
     fi
 else
-    info "curl or Burp CA not available; HTTPS check skipped"
+    skip "HTTPS proxy verification (use --network-test to enable)"
 fi
 
 echo "== Security posture =="
@@ -198,17 +238,17 @@ if command -v ss >/dev/null 2>&1; then
 
     # Check MCP ports are NOT exposed publicly
     for mcp_port in 8080 9876 9877 5901; do
-        public="$(ss -tlnH "sport = :${mcp_port}" 2>/dev/null | grep -v '127.0.0.1' | grep -vc '\[::1\]' || true)"
-        if [ "$public" -gt 0 ]; then
-            warn "Port ${mcp_port}: exposed on non-loopback interface"
+        non_loopback="$(ss -tlnH "sport = :${mcp_port}" 2>/dev/null | awk '{print $4}' | grep -vE '^(127\.0\.0\.1|\[::ffff:127\.0\.0\.1\]|\[::1\]):' | head -1 || true)"
+        if [ -n "$non_loopback" ]; then
+            warn "Port ${mcp_port}: exposed on non-loopback interface ($non_loopback)"
         else
             ok "Port ${mcp_port}: loopback-only"
         fi
     done
 else
-    info "ss not available; SSH exposure check skipped"
+    skip "ss not available; security posture check skipped"
 fi
 
 echo
-echo "Summary: ${PASS} ok, ${WARN} warnings, ${FAIL} failed"
+echo "Summary: ${PASS} ok, ${WARN} warnings, ${FAIL} failed, ${SKIP} skipped"
 [ "$FAIL" -eq 0 ]
