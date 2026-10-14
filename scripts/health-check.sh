@@ -83,6 +83,110 @@ if command -v tailscale >/dev/null 2>&1; then
     else warn "Tailscale: not connected (run: sudo tailscale up)"; fi
 else info "Tailscale not installed (optional; run: sudo bash scripts/install-tailscale.sh)"; fi
 
+echo "== Java / Burp Suite =="
+if command -v java >/dev/null 2>&1; then
+    jver="$(java -version 2>&1 | head -1 | sed 's/.*version "\([^"]*\)".*/\1/')"
+    case "$jver" in 25.*) ok "Java: OpenJDK $jver";; *) warn "Java: $jver (validated: OpenJDK 25)";; esac
+else
+    warn "Java not installed (run: sudo apt install openjdk-25-jre)"
+fi
+
+BURP_JAR="${BURP_JAR:-$HOME/tools/burp/burpsuite_desktop_v2026.9.1.jar}"
+if [ -f "$BURP_JAR" ]; then
+    if pgrep -f "burpsuite_desktop_v.*\.jar" >/dev/null 2>&1; then
+        ok "Burp Suite: running"
+    else
+        warn "Burp Suite: installed but not running (start with: bash scripts/start-burp.sh)"
+    fi
+else
+    warn "Burp Suite: not installed at $BURP_JAR"
+fi
+
+echo "== VNC / XFCE =="
+if pgrep -x Xtigervnc >/dev/null 2>&1; then
+    vnc_disp="$(pgrep -a Xtigervnc 2>/dev/null | grep -oP ':\d+' | head -1)"
+    ok "TigerVNC: running (display ${vnc_disp:-unknown})"
+else
+    warn "TigerVNC: not running (start with: vncserver :1 -localhost yes)"
+fi
+
+if [ -n "${DISPLAY:-}" ] || [ -f "$HOME/.Xauthority" ]; then
+    if DISPLAY=:1 xdpyinfo >/dev/null 2>&1; then
+        ok "XFCE display :1: reachable"
+    else
+        warn "XFCE display :1: not reachable"
+    fi
+else
+    info "No X display configured"
+fi
+
+echo "== Network ports =="
+for port_check in 8080 9876 9877; do
+    # Match 127.0.0.1:PORT, [::ffff:127.0.0.1]:PORT, and [::1]:PORT
+    if ss -tlnH 2>/dev/null | grep -qE "(127\.0\.0\.1|\[::ffff:127\.0\.0\.1\]|\[::1\]):?${port_check}\b"; then
+        ok "Port ${port_check}: listening (localhost)"
+    elif ss -tlnH 2>/dev/null | grep -qE ":${port_check}\b"; then
+        warn "Port ${port_check}: listening on non-loopback interface"
+    else
+        warn "Port ${port_check}: not listening"
+    fi
+done
+
+echo "== MCP connections =="
+if command -v opencode >/dev/null 2>&1; then
+    mcp_output="$(opencode mcp list 2>/dev/null || true)"
+    if [ -n "$mcp_output" ]; then
+        for mcp_name in "Burp" "Burp_extended" "playwright"; do
+            if echo "$mcp_output" | grep -q "✓.*${mcp_name}"; then
+                ok "MCP ${mcp_name}: connected"
+            else
+                fail "MCP ${mcp_name}: not connected"
+            fi
+        done
+    else
+        warn "opencode mcp list: no output"
+    fi
+else
+    info "opencode not installed; MCP check skipped"
+fi
+
+echo "== HTTPS interception =="
+NSS_DB="$HOME/tools/playwright/isolated-home/.pki/nssdb/cert9.db"
+BURP_CA_PEM="$HOME/tools/playwright/burp-ca.pem"
+
+if [ -f "$NSS_DB" ]; then
+    ok "Isolated NSS trust store: present"
+else
+    warn "Isolated NSS trust store: not found ($NSS_DB)"
+fi
+
+if [ -f "$BURP_CA_PEM" ]; then
+    if openssl x509 -in "$BURP_CA_PEM" -noout 2>/dev/null; then
+        ok "Burp CA PEM: valid"
+    else
+        warn "Burp CA PEM: invalid or corrupted"
+    fi
+else
+    warn "Burp CA PEM: not found ($BURP_CA_PEM)"
+fi
+
+# Read-only HTTPS proxy verification against approved benign endpoint
+if command -v curl >/dev/null 2>&1 && [ -f "$BURP_CA_PEM" ]; then
+    https_code="$(curl -s --noproxy "" \
+        --proxy http://127.0.0.1:8080 \
+        --cacert "$BURP_CA_PEM" \
+        --max-time 15 \
+        -o /dev/null -w '%{http_code}' \
+        https://example.com/ 2>/dev/null || echo "000")"
+    if [ "$https_code" = "200" ] || [ "$https_code" = "301" ] || [ "$https_code" = "302" ]; then
+        ok "HTTPS via Burp proxy: verified (HTTP $https_code)"
+    else
+        fail "HTTPS via Burp proxy: failed (HTTP $https_code)"
+    fi
+else
+    info "curl or Burp CA not available; HTTPS check skipped"
+fi
+
 echo "== Security posture =="
 if command -v ss >/dev/null 2>&1; then
     exposed="$(ss -tlnH 'sport = :22' 2>/dev/null | awk '{print $4}' | grep -Ec '^(0\.0\.0\.0|\*):22$' || true)"
@@ -91,6 +195,16 @@ if command -v ss >/dev/null 2>&1; then
     else
         ok "SSH not listening on 0.0.0.0:22"
     fi
+
+    # Check MCP ports are NOT exposed publicly
+    for mcp_port in 8080 9876 9877 5901; do
+        public="$(ss -tlnH "sport = :${mcp_port}" 2>/dev/null | grep -v '127.0.0.1' | grep -vc '\[::1\]' || true)"
+        if [ "$public" -gt 0 ]; then
+            warn "Port ${mcp_port}: exposed on non-loopback interface"
+        else
+            ok "Port ${mcp_port}: loopback-only"
+        fi
+    done
 else
     info "ss not available; SSH exposure check skipped"
 fi

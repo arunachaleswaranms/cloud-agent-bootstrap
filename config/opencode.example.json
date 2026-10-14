@@ -1,16 +1,24 @@
 {
-  // Copy to ~/.config/opencode/opencode.json and adjust to your needs.
-  // MCP servers below are DISABLED examples only - enable one explicitly
-  // and only when you need it. Never store tokens or credentials in this file.
+  // Copy to ~/.config/opencode/opencode.jsonc (or .json) and adjust to your needs.
+  // This example configures the three validated MCP integrations.
+  // Never store tokens or credentials in this file.
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "filesystem-example": {
-      "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/absolute/path/to/allowed/working/dir"],
-      "enabled": false
+    "Burp": {
+      "type": "remote",
+      "url": "http://127.0.0.1:9876"
     },
-    "fetch-example": {
-      "command": ["npx", "-y", "@modelcontextprotocol/server-everything"],
-      "enabled": false
+    "Burp_extended": {
+      "type": "local",
+      "command": ["/home/YOUR_USER/.local/bin/burp-mcp", "serve"],
+      "enabled": true,
+      "timeout": 30000
+    },
+    "playwright": {
+      "type": "local",
+      "command": ["/home/YOUR_USER/tools/playwright/start-mcp.sh"],
+      "enabled": true,
+      "timeout": 60000
     }
   },
   "permission": {
