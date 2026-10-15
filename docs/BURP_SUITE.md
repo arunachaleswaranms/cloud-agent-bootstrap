@@ -64,7 +64,20 @@ scripts/start-burp.sh --status  # status only
 scripts/start-burp.sh --stop    # stop the running instance
 ```
 
-Environment overrides: `BURP_JAR`, `BURP_JAVA`, `BURP_DISPLAY`, `BURP_XMX`, `BURP_LOG_DIR`.
+Environment overrides: `BURP_JAR`, `BURP_JAVA`, `BURP_DISPLAY`, `BURP_XMX`, `BURP_LOG_DIR`, `BURP_READY_TIMEOUT`.
+
+## Regression tests
+
+The launcher process-management behaviour is covered by automated tests
+that need no Burp installation, no JVM display and no network access:
+
+```bash
+tests/run-all.sh
+```
+
+The suites replace `java` and `gcloud` with fakes inside a sandboxed
+runtime directory, so they never adopt, report or signal a real Burp
+process.
 
 ## Running independently of browser SSH
 
@@ -80,8 +93,23 @@ session. You can:
 
 `scripts/start-burp.sh` checks for an existing instance via:
 
-1. PID file at `~/.local/state/burp/burp.pid`.
-2. Process table scan for `burpsuite_desktop_v*.jar`.
+1. PID file at `~/.local/state/burp/burp.pid`, which records both the PID
+   and the process start time.
+2. If the PID file is absent or stale, an exact-match scan of the
+   configured JAR path (`$BURP_JAR`).
+
+There is deliberately **no** generic `pgrep -f` matching and no loose
+`burpsuite_desktop_v*.jar` regex: a process is only treated as "our Burp"
+when its command line contains the exact configured JAR path as a whole
+argument token **and** it is owned by the current user. Unrelated JVMs,
+other applications and other Burp builds are therefore never matched and
+never signalled.
+
+Identity is re-verified immediately before every termination signal
+(SIGTERM and SIGKILL), and the recorded start time is used to detect PID
+reuse, so a recycled PID belonging to an unrelated process is never
+killed. A stale PID file is removed as bookkeeping only; the process it
+referenced is left alone.
 
 If Burp is already running, the script reports the existing PID and exits
 without launching a second instance.

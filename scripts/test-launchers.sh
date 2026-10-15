@@ -40,8 +40,12 @@ else
     echo "  [SKIP] shellcheck not installed"
 fi
 
+# NOTE: capture output into a variable before matching. Piping straight into
+# `grep -q` is racy: grep exits on first match, the producer takes SIGPIPE, and
+# `set -o pipefail` then reports the whole pipeline as failed.
 echo "== start-burp.sh: help output =="
-if bash scripts/start-burp.sh --help 2>&1 | grep -q "idempotent"; then
+help_out="$(bash scripts/start-burp.sh --help 2>&1 || true)"
+if printf '%s\n' "$help_out" | grep -q "idempotent"; then
     ok "start-burp.sh --help produces usage"
 else
     bad "start-burp.sh --help missing or empty"
@@ -54,16 +58,22 @@ else
     bad "start-burp.sh accepted invalid option"
 fi
 
-echo "== start-burp.sh: status (read-only) =="
-# Should not start or stop anything; just report
-if bash scripts/start-burp.sh --status >/dev/null 2>&1; then
+echo "== start-burp.sh: status (read-only, hermetic) =="
+# Point the script at a sandboxed JAR and runtime dir so this smoke test can
+# never adopt, report or signal a real Burp installation.
+HERMETIC_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-smoke.XXXXXX")"
+trap 'rm -rf "$HERMETIC_DIR"' EXIT
+if BURP_JAR="$HERMETIC_DIR/absent.jar" \
+   BURP_LOG_DIR="$HERMETIC_DIR/state" \
+   bash scripts/start-burp.sh --status >/dev/null 2>&1; then
     ok "start-burp.sh --status runs (Burp running)"
 else
     ok "start-burp.sh --status runs (Burp not running, exit 1)"
 fi
 
 echo "== macbook-vnc-launcher.sh: help output =="
-if bash scripts/macbook-vnc-launcher.sh --help 2>&1 | grep -q "IAP"; then
+help_out="$(bash scripts/macbook-vnc-launcher.sh --help 2>&1 || true)"
+if printf '%s\n' "$help_out" | grep -q "IAP"; then
     ok "macbook-vnc-launcher.sh --help produces usage"
 else
     bad "macbook-vnc-launcher.sh --help missing or empty"
@@ -77,14 +87,17 @@ else
 fi
 
 echo "== macbook-vnc-launcher.sh: missing config =="
-if ! GCP_PROJECT="" GCP_ZONE="" GCP_INSTANCE="" bash scripts/macbook-vnc-launcher.sh >/dev/null 2>&1; then
+if ! GCP_PROJECT="" GCP_ZONE="" GCP_INSTANCE="" \
+       VNC_RUNTIME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/launcher-smoke.XXXXXX")" \
+       bash scripts/macbook-vnc-launcher.sh >/dev/null 2>&1; then
     ok "macbook-vnc-launcher.sh rejects empty config"
 else
     bad "macbook-vnc-launcher.sh accepted empty config"
 fi
 
 echo "== health-check.sh: help output =="
-if bash scripts/health-check.sh --help 2>&1 | grep -q "network-test"; then
+help_out="$(bash scripts/health-check.sh --help 2>&1 || true)"
+if printf '%s\n' "$help_out" | grep -q "network-test"; then
     ok "health-check.sh --help produces usage"
 else
     bad "health-check.sh --help missing or empty"

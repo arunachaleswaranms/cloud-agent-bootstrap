@@ -63,7 +63,7 @@ gcloud compute ssh <instance> \
   --zone=<zone> \
   --tunnel-through-iap \
   --ssh-flag="-N" \
-  --ssh-flag=-L"5901:127.0.0.1:5901" \
+  --ssh-flag="-L 127.0.0.1:5901:127.0.0.1:5901" \
   --ssh-flag="-o ServerAliveInterval=30" \
   --ssh-flag="-o ServerAliveCountMax=3" \
   --ssh-flag="-o ExitOnForwardFailure=yes"
@@ -72,8 +72,9 @@ gcloud compute ssh <instance> \
 This forwards local port 5901 to the VM's VNC port through IAP in a
 single SSH connection. No second SSH hop is needed.
 
-The tunnel binds to localhost only. SSH identity verification is
-preserved (no `StrictHostKeyChecking=no`).
+The forward address is pinned to `127.0.0.1` on both ends, so the local
+endpoint is never exposed on any external interface. SSH identity
+verification is preserved (no `StrictHostKeyChecking=no`).
 
 ## Reconnecting after MacBook sleep or restart
 
@@ -126,10 +127,15 @@ scripts/macbook-vnc-launcher.sh
 The launcher:
 
 1. Checks for an existing tunnel (avoids duplicates).
-2. Creates the IAP tunnel with VNC port forwarding.
+2. Creates the IAP tunnel with VNC port forwarding bound to `127.0.0.1`.
 3. Waits for the local port to accept connections.
 4. Opens Screen Sharing only after the forward is ready.
-5. Tracks its PID in `/tmp/macbook-vnc-tunnel.pid`.
+5. Records the tunnel PID and its process start time in a private,
+   per-user runtime directory (`~/.local/state/vnc-tunnel/tunnel.pid`,
+   directory mode 700). It never uses a shared path such as `/tmp`.
+
+Additional tunables: `LOCAL_VNC_PORT` (default `5901`), `VNC_RUNTIME_DIR`
+and `TUNNEL_READY_TIMEOUT` (default `30` seconds).
 
 To stop the tunnel:
 
@@ -138,12 +144,16 @@ scripts/macbook-vnc-launcher.sh --stop
 ```
 
 The stop command terminates only the tunnel process identified by the
-tracked PID. It does not terminate unrelated SSH or Screen Sharing
-sessions.
+tracked PID, after re-verifying that the process is still owned by the
+current user, still matches the tunnel command line, and still has the
+recorded start time (which is how PID reuse is detected). Its child
+processes are terminated with it. Unrelated SSH, `gcloud` or Screen
+Sharing sessions are never signalled.
 
-> **Note**: This script targets macOS. Shell syntax is validated on
-> Ubuntu, but macOS-specific behavior (Screen Sharing, osascript) is
-> unverified unless actually tested on macOS.
+> **Note**: This script targets macOS. Shell syntax and the
+> process-management logic are covered by automated regression tests on
+> Linux, but macOS-specific behavior (Screen Sharing, IAP transport) is
+> **not verified** in CI unless the suite is run on a Mac.
 
 ## Diagnosing IAP, SSH, and VNC failures
 

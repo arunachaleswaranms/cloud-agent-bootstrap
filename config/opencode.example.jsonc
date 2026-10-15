@@ -1,5 +1,6 @@
 {
-  // Copy to ~/.config/opencode/opencode.jsonc (or .json) and adjust to your needs.
+  // Copy to ~/.config/opencode/opencode.jsonc and adjust to your needs.
+  // JSONC: this file intentionally uses // comments, so keep the .jsonc name.
   // This example configures the three validated MCP integrations.
   // Never store tokens or credentials in this file.
   "$schema": "https://opencode.ai/config.json",
