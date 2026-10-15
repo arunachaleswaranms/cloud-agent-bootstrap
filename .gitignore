@@ -2,6 +2,8 @@
 .env
 .env.*
 *.env
+# Safe, value-free templates must stay tracked.
+!config/example.env
 .envrc
 .env.local
 secrets.env
@@ -20,6 +22,15 @@ id_ed25519*
 id_ecdsa*
 id_dsa*
 *.auth
+*.der
+burp-ca*
+burp_license*
+*.lic
+*.license
+license.json
+*.session.json
+cookies.txt
+.netrc
 
 secrets/
 credentials/
@@ -33,7 +44,77 @@ credentials/
 # --- OpenCode ----------------------------------------------------------------
 .opencode/
 opencode.json
-auth.json
+opencode.jsonc
+opencode.jsonc.backup*
+opencode.jsonc.bak
+opencode.jsonc.before-*
+
+# --- Burp Suite --------------------------------------------------------------
+# Proprietary binaries, license files, CA certs, captured traffic, sessions
+tools/burp/
+tools/burp-mcp-extended/
+.BurpSuite/
+burp/
+burp-*.jar
+burpsuite_*.jar
+burploader*.jar
+burp-mcp*.jar
+burp-mcp-linux-*
+burp-mcp-macos-*
+burp-mcp.cdx.json
+burp-mcp
+burp-mcp-extended/
+burp-ca.der
+burp-ca.pem
+burp-ca.cer
+burp-ca.crt
+burp_license
+burp-license
+*.burp
+burpsuite_project/
+burp-session/
+burp-temp/
+burp-transfer/
+burp.log
+burp-user.json
+burp.config.ini
+zer0day*.config.ini
+SHA256SUMS
+
+# --- Browser / session data --------------------------------------------------
+browser-data/
+browser-profile/
+playwright/.auth/
+.cookies/
+cookies.json
+*.sqlite
+*.sqlite3
+*.session
+.isolated-home/
+.pki/
+nssdb/
+cert9.db
+cert8.db
+key4.db
+key3.db
+
+# --- Labs / assessment data --------------------------------------------------
+labs/
+evidence/
+reports/*.pdf
+reports/*.html
+scope/
+recon/
+test-site/
+*.pcap
+*.pcapng
+*.har
+
+# --- Nested third-party Git repositories -------------------------------------
+burp-mcp-review/
+**/burp-mcp-review/
+vendor/
+third-party/
 
 # --- Node / npm --------------------------------------------------------------
 node_modules/
@@ -51,15 +132,6 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 pip-wheel-metadata/
-
-# --- Browser / session data --------------------------------------------------
-browser-data/
-playwright/.auth/
-.cookies/
-cookies.json
-*.sqlite
-*.sqlite3
-*.session
 
 # --- Editors / OS ------------------------------------------------------------
 .DS_Store

@@ -21,8 +21,17 @@ Supported baseline: **Ubuntu 24.04 LTS (noble) x86_64**, validated on GCP
 | Go | 1.22.2 |
 | GitHub CLI | distro `gh` (noble) |
 | OpenCode | 1.18.35 (pinned) |
-| Playwright | 1.64.0 (Chromium) |
-| Terminal | tmux + Tailscale |
+| Burp Suite | Community 2026.9.1 |
+| Java | OpenJDK 25.0.4.1 |
+| Burp proxy | 127.0.0.1:8080 |
+| Official Burp MCP | 127.0.0.1:9876 |
+| Extended Burp MCP | v3.3.0 (gRPC 127.0.0.1:9877) |
+| Playwright | 1.64.0 (Chromium, headless) |
+| Browser proxy | 127.0.0.1:8080 (Burp) |
+| Burp CA | Isolated NSS trust store |
+| Desktop | XFCE + TigerVNC, display :1 |
+| Remote GUI | Google Cloud IAP SSH tunnel from MacBook |
+| Session persistence | tmux |
 
 ## Quick start
 
@@ -73,17 +82,76 @@ These require interactive credentials and cannot be scripted safely:
 
 ```
 bootstrap.sh                  one-shot, idempotent provisioning
-scripts/                      individual idempotent installer scripts
-config/                       tmux.conf, opencode.example.json, secrets.env.example
+scripts/                      individual installer + operational scripts
+  start-burp.sh               idempotent Burp launcher
+  macbook-vnc-launcher.sh     IAP tunnel + Screen Sharing from macOS
+  health-check.sh             read-only infrastructure health check
+config/                       tmux.conf, opencode.example.jsonc, secrets.env.example
 packages/                     apt.txt, npm.txt, go-tools.txt inventories
-docs/                         GCP_SETUP.md, MIGRATION.md, RECOVERY.md
+docs/
+  GCP_SETUP.md                GCP VM creation and IAP access
+  MIGRATION.md                Migrating to a new VM
+  RECOVERY.md                 Recovery runbook
+  BURP_SUITE.md               Burp Suite setup and operation
+  BURP_MCP.md                 Official Burp MCP (port 9876)
+  BURP_MCP_EXTENDED.md        Extended Burp MCP v3.3.0 (port 9877)
+  PLAYWRIGHT.md               Playwright Chromium MCP
+  HTTPS_INTERCEPTION.md       Burp CA, NSS trust, HTTPS verification
+  VNC_REMOTE_ACCESS.md        TigerVNC, IAP tunnel, MacBook launcher
+  AI_SECURITY_ROADMAP.md      Future assessment workflow
+tests/                        hermetic launcher regression suites
+  run-all.sh                  run every regression suite
+  test-vnc-launcher.sh        IAP tunnel process-safety tests
+  test-start-burp.sh          Burp launcher process-safety tests
+  check-sensitive-files.sh    secret / sensitive-artefact guard
+.github/workflows/ci.yml      CI: syntax, ShellCheck, tests, config, secrets
 ```
+
+## MCP integrations
+
+Three MCP servers are configured in OpenCode:
+
+1. **Official Burp MCP** — remote HTTP at `http://127.0.0.1:9876`
+2. **Extended Burp MCP** — local stdio via `~/.local/bin/burp-mcp serve`
+3. **Playwright MCP** — local launcher at `~/tools/playwright/start-mcp.sh`
+
+See [config/opencode.example.jsonc](config/opencode.example.jsonc) for a
+sanitized template.
 
 ## Verification
 
 ```bash
-bash scripts/health-check.sh
+bash scripts/health-check.sh    # read-only infrastructure health check
+tests/run-all.sh                # launcher regression suites (no live services needed)
 ```
+
+The regression suites are hermetic: they stub `gcloud`, `java` and
+`xdpyinfo` inside a sandboxed runtime directory, so they never start,
+adopt or signal a real Burp, SSH or tunnel process. They require no GCP
+resources, no Burp Suite, no API credentials and no external targets.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request and
+performs:
+
+- Bash syntax validation (`bash -n`) for every tracked shell script.
+- ShellCheck at `style` severity with `-x` external sources.
+- The full launcher regression suite.
+- JSON/JSONC configuration validation.
+- Documented port and version consistency checks.
+- Secret-exposure and sensitive-artefact scans, including a guard
+  against committed Burp binaries, CA material, browser sessions,
+  captured traffic or vendored third-party repositories.
+
+CI requires no live GCP resources, no Burp Suite, no API credentials and
+no access to assessment targets, and it deliberately runs no
+vulnerability scanners.
+
+> macOS-specific behaviour of `scripts/macbook-vnc-launcher.sh` (Screen
+> Sharing, IAP transport) is **not verified** by CI, which runs on
+> Ubuntu. Its shell logic and process management are covered by the
+> regression suite.
 
 ## Secrets policy
 

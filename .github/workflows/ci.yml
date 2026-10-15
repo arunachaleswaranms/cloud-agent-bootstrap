@@ -1,0 +1,223 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "infra/**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Least privilege: read-only by default, no write scopes.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell-and-regression:
+    name: Shell + regression tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      # Pinned to an immutable commit SHA.
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install ShellCheck (Ubuntu package)
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends shellcheck
+          shellcheck --version
+
+      - name: Bash syntax validation
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files '*.sh')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No shell scripts found" >&2
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            printf '  bash -n %s ... ' "$f"
+            if bash -n "$f"; then echo "ok"; else echo "FAILED"; exit 1; fi
+          done
+
+      - name: ShellCheck
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files '*.sh')
+          shellcheck --severity=style --external-sources "${files[@]}"
+
+      - name: Launcher regression tests
+        run: tests/run-all.sh
+
+  config-validation:
+    name: Configuration validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Validate JSON and JSONC configuration
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          failures = []
+
+          def strip_jsonc(text):
+              """Remove // line comments and /* */ block comments."""
+              out, i, n = [], 0, len(text)
+              while i < n:
+                  ch = text[i]
+                  if ch == '"':
+                      out.append(ch)
+                      i += 1
+                      while i < n:
+                          out.append(text[i])
+                          if text[i] == '\\':
+                              i += 1
+                              if i < n:
+                                  out.append(text[i])
+                                  i += 1
+                          elif text[i] == '"':
+                              i += 1
+                              break
+                          i += 1
+                      continue
+                  if text.startswith('//', i):
+                      while i < n and text[i] != '\n':
+                          i += 1
+                      continue
+                  if text.startswith('/*', i):
+                      i = text.find('*/', i + 2)
+                      i = n if i == -1 else i + 2
+                      continue
+                  out.append(ch)
+                  i += 1
+              return ''.join(out)
+
+          checked = 0
+          for path in sorted(pathlib.Path('.').rglob('*')):
+              if not path.is_file() or '.git' in path.parts:
+                  continue
+              if not re.search(r'\.(json|jsonc)$', path.name) and path.name != 'tmux.conf':
+                  continue
+              raw = path.read_text(encoding='utf-8', errors='replace')
+              if path.suffix == '.json':
+                  try:
+                      json.loads(raw)
+                      print(f'  ok (json)   {path}')
+                  except Exception as exc:
+                      failures.append(f'{path}: {exc}')
+              elif path.name == 'tmux.conf':
+                  print(f'  ok (conf)  {path}')
+              else:
+                  try:
+                      json.loads(strip_jsonc(raw))
+                      print(f'  ok (jsonc)  {path}')
+                  except Exception as exc:
+                      failures.append(f'{path}: {exc}')
+              checked += 1
+
+          if checked == 0:
+              failures.append('no JSON/JSONC configuration files were found')
+          for f in failures:
+              print(f'  FAILED {f}')
+          sys.exit(1 if failures else 0)
+          PY
+
+      - name: Validate example.env and secrets.env.example are inert
+        run: |
+          set -euo pipefail
+          for f in config/example.env config/secrets.env.example; do
+            printf '  %s ... ' "$f"
+            if bash -n "$f"; then echo "ok"; else echo "FAILED"; exit 1; fi
+          done
+          if grep -Eq '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=.+' config/secrets.env.example; then
+            echo "  FAILED: config/secrets.env.example contains non-empty values" >&2
+            exit 1
+          fi
+          echo "  config/secrets.env.example contains no values"
+
+      - name: Validate documented ports and versions
+        run: |
+          set -euo pipefail
+          check() {
+            local desc="$1" pattern="$2" file="$3"
+            printf '  %-44s ' "$desc"
+            if grep -Eq "$pattern" "$file"; then echo "ok"; else
+              echo "FAILED (not found in $file)"; exit 1
+            fi
+          }
+          check "Ubuntu 24.04 baseline"        '24\.04'                        README.md
+          check "Burp Suite 2026.9.1"          '2026\.9\.1'                    README.md
+          check "Official Burp MCP on 9876"     '9876'                          docs/BURP_MCP.md
+          check "Extended Burp MCP on 9877"     '9877'                          docs/BURP_MCP_EXTENDED.md
+          check "HTTP(S) proxy on 8080"         '127\.0\.0\.1:8080'             README.md
+          check "TigerVNC display :1"           'display :1|:1'                 docs/VNC_REMOTE_ACCESS.md
+          check "IAP tunnelling"                'IAP'                           docs/VNC_REMOTE_ACCESS.md
+          check "Playwright Chromium MCP"       'Chromium'                      docs/PLAYWRIGHT.md
+          check "OpenCode MCP configuration"    'opencode'                      README.md
+
+  sensitive-content:
+    name: Sensitive file and secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          # Full history so the scan can see what the branch actually adds.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: No secrets or sensitive artefacts are tracked
+        run: tests/check-sensitive-files.sh
+
+      - name: No vendored third-party repositories
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -Eq '(^|/)(\.git|vendor|third-party)/'; then
+            echo "Third-party or vendored content is tracked:" >&2
+            git ls-files | grep -E '(^|/)(\.git|vendor|third-party)/' >&2
+            exit 1
+          fi
+          echo "  no vendored third-party content"
+
+      - name: No Burp binaries, CA material, browser sessions or captured traffic
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -Eiq '(^|/)(tools/burp/|burp-ca\.|\.BurpSuite/|browser-profile/|burp-transfer/|burpsuite_project/)|\.jar$|\.(pcap|pcapng|har)$'; then
+            echo "Burp binaries, CA material, browser sessions or captured traffic are tracked:" >&2
+            git ls-files | grep -Ei '(^|/)(tools/burp/|burp-ca\.|\.BurpSuite/|browser-profile/|burp-transfer/|burpsuite_project/)|\.jar$|\.(pcap|pcapng|har)$' >&2
+            exit 1
+          fi
+          echo "  no Burp binaries, CA material, browser sessions or captured traffic"
+
+      - name: Working tree is clean
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Generated or ignored artefacts leaked into the tree:" >&2
+            git status --porcelain >&2
+            exit 1
+          fi
+          echo "  working tree clean"

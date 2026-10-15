@@ -1,0 +1,29 @@
+{
+  // Copy to ~/.config/opencode/opencode.jsonc and adjust to your needs.
+  // JSONC: this file intentionally uses // comments, so keep the .jsonc name.
+  // This example configures the three validated MCP integrations.
+  // Never store tokens or credentials in this file.
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "Burp": {
+      "type": "remote",
+      "url": "http://127.0.0.1:9876"
+    },
+    "Burp_extended": {
+      "type": "local",
+      "command": ["/home/YOUR_USER/.local/bin/burp-mcp", "serve"],
+      "enabled": true,
+      "timeout": 30000
+    },
+    "playwright": {
+      "type": "local",
+      "command": ["/home/YOUR_USER/tools/playwright/start-mcp.sh"],
+      "enabled": true,
+      "timeout": 60000
+    }
+  },
+  "permission": {
+    "edit": "ask",
+    "bash": "ask"
+  }
+}
