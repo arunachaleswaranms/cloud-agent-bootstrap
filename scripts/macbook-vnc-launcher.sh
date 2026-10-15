@@ -423,7 +423,7 @@ cmd_start() {
     if tunnel_pid >/dev/null; then
         log "IAP tunnel already running — reusing it"
         cmd_status || true
-        open_screen_sharing
+        open_screen_sharing || true
         return 0
     fi
 
@@ -482,18 +482,25 @@ cmd_start() {
 
     STARTUP_COMPLETE=1
     log "VNC forward ready on 127.0.0.1:${LOCAL_VNC_PORT}"
-    open_screen_sharing
+    open_screen_sharing || true
     log "Done. Screen Sharing should prompt for the VNC password."
     log "To stop: $0 --stop"
 }
 
+# Never let a failure to launch the GUI client abort the launcher: the tunnel
+# is already established at this point. Always returns 0.
 open_screen_sharing() {
+    local url="vnc://127.0.0.1:${LOCAL_VNC_PORT}"
     if command -v open >/dev/null 2>&1; then
         log "Opening Screen Sharing..."
-        open "vnc://127.0.0.1:${LOCAL_VNC_PORT}"
-    else
-        log "macOS 'open' not available; connect manually to vnc://127.0.0.1:${LOCAL_VNC_PORT}"
+        if open "$url" >/dev/null 2>&1; then
+            return 0
+        fi
+        warn "Could not launch Screen Sharing automatically; open ${url} manually"
+        return 0
     fi
+    log "macOS 'open' not available; connect manually to ${url}"
+    return 0
 }
 
 case "${1:-start}" in

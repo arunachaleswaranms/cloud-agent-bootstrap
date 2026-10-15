@@ -116,7 +116,11 @@ section "Startup and runtime state"
 
 out="$(bash "$LAUNCHER" start 2>&1)"
 rc=$?
-assert_eq "start succeeds with a reachable forward" "$rc" "0"
+if [ "$rc" -eq 0 ]; then
+    pass "start succeeds with a reachable forward"
+else
+    fail "start succeeds with a reachable forward" "rc=$rc; launcher output: ${out:-<empty>}"
+fi
 assert_file_exists "PID file is created in the private runtime dir" "$PID_FILE"
 assert_mode "runtime directory is 0700" "$VNC_RUNTIME_DIR" "700"
 assert_mode "PID file is 0600" "$PID_FILE" "600"
@@ -251,6 +255,23 @@ assert_dead "the single tunnel process is stopped" "$FIRST_PID"
 assert_cmd_ok "stop on an already-stopped tunnel succeeds" \
     bash "$LAUNCHER" --stop
 assert_cmd_ok "a fresh start after stop succeeds again" bash "$LAUNCHER" start
+bash "$LAUNCHER" --stop >/dev/null 2>&1
+
+# ---------------------------------------------------------------------------
+section "A failing GUI client does not abort the launcher"
+
+# Some environments provide an `open` binary that rejects vnc:// URLs. A
+# non-zero exit from it must not be treated as a launcher failure.
+setup_env bind
+printf '#!/bin/sh\nexit 3\n' > "$SANDBOX/bin/open"
+chmod 755 "$SANDBOX/bin/open"
+
+out="$(bash "$LAUNCHER" start 2>&1)"
+rc=$?
+assert_eq "start still succeeds when the GUI client fails" "$rc" "0"
+assert_contains "the GUI failure is reported as a warning" \
+    "$out" "Could not launch Screen Sharing automatically"
+assert_contains "the tunnel is left running for the user" "$out" "VNC forward ready"
 bash "$LAUNCHER" --stop >/dev/null 2>&1
 
 # ---------------------------------------------------------------------------

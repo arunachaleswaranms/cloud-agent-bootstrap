@@ -2,6 +2,8 @@
 .env
 .env.*
 *.env
+# Safe, value-free templates must stay tracked.
+!config/example.env
 .envrc
 .env.local
 secrets.env
