@@ -1,0 +1,16 @@
+[Unit]
+Description=Oracle A1 Always Free capacity catcher (fail-closed)
+Documentation=https://github.com/arunachaleswaranms/cloud-agent-bootstrap/blob/main/docs/ORACLE_A1_AUTOMATION.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Template assumes repository at ~/cloud-agent-bootstrap as documented in README.
+Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.config/oracle-a1-catcher.env
+ExecStart=/usr/bin/python3 %h/cloud-agent-bootstrap/scripts/oracle/a1_catcher.py --execute
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=300
