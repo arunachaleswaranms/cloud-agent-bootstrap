@@ -21,6 +21,13 @@ GCP Ubuntu VM -- user systemd timer (5min + jitter)
        +-- state=pending --> OCI GetInstance ----------> verify RUNNING;
        |                                                 then mark done and alert
        |
+       +-- state=launching (crash/restart/ambiguous) --> reconcile, NEVER launch
+       |      +-- one instance tagged with intent ------> pending
+       |      +-- tagged instance terminated, several
+       |      |   tagged, or untagged A1/same name -----> halt
+       |      +-- not found / list fails, < 15 min -----> wait, re-check next cycle
+       |      +-- not found / list fails, >= 15 min ----> halt (manual reconciliation)
+       |
        +-- read OCI ListInstances in target compartment
               |
               +-- target exists --> track it, don't create another
@@ -28,18 +35,29 @@ GCP Ubuntu VM -- user systemd timer (5min + jitter)
               +-- preflight failure --> halt; notify
               +-- no matching instance
                      |
-                     +-- OCI LaunchInstance, A1 only, no SDK retry
-                            +-- out-of-host-capacity -> retry next timer
+                     +-- fsync state=launching + random intent_id (write-ahead)
+                     +-- OCI LaunchInstance, A1 only, no SDK retry,
+                         freeform tag a1-catcher-intent=<intent_id>
+                            +-- out-of-host-capacity -> clear intent; retry next timer
                             +-- OCI 429 -> cooldown 30 min
-                            +-- success -> record OCID as pending
-                            +-- everything else / ambiguous -> halt
+                            +-- LimitExceeded -> halt
+                            +-- success with OCID -> record OCID as pending
+                            +-- ambiguous / no OCID -> keep intent; reconcile
 ```
 
 Systemd user timer runs **one attempt per activation**, not a tight polling
-loop. The lock prevents concurrency. `state.json` tracks accepted launches and
-stops duplicates, including after restart. On an ambiguous timeout the script
-**halts** until an operator reconciles OCI state. Ordinary capacity rejections
-are retried. Status is verified as `RUNNING` on a subsequent timer cycle.
+loop. The lock prevents concurrency. Before every `LaunchInstance` request the
+script durably writes `state=launching` with a random `intent_id` (temp file,
+`fsync`, atomic rename, directory `fsync`); if that write fails, no request is
+sent. The launch carries the freeform tag `a1-catcher-intent=<intent_id>`.
+A `launching` record therefore means "a request may have reached OCI":
+every later run reconciles it against `ListInstances` by tag and **never
+issues another launch** for it. A uniquely tagged live instance is adopted
+as `pending`. If the outcome cannot be determined within 15 minutes (no
+tagged instance, or listing keeps failing), or the evidence is
+contradictory, the script **halts** until an operator reconciles OCI state.
+Only definitive rejections clear the intent. Out-of-host-capacity is
+retried on the next cycle, and HTTP 429 becomes a 30-minute cooldown. Status is verified as `RUNNING` on a subsequent timer cycle.
 Optional Telegram notification is sent on `RUNNING` or fatal halt.
 
 > Credit: approach inspired by
@@ -147,9 +165,23 @@ cat ~/.local/state/oci-a1-catcher/state.json
 ```
 
 If status is `done` or `halt`, the timer will not launch more instances.
+If status is `launching`, the timer is reconciling and will not launch either.
 Before resetting state, **manually list instances in OCI** across relevant
 compartments and reconcile any accepted launch. Never blindly delete
 `state.json`, particularly after a timeout or permission failure.
+
+When a halt record contains `intent_id`, a launch request may have reached
+OCI. Search for it by tag (include terminated instances):
+
+```bash
+oci --region ap-hyderabad-1 compute instance list \
+  --compartment-id <OCID> --all --output json | grep -n '<intent_id>'
+```
+
+- Tagged instance exists and is wanted: record it so the timer verifies it,
+  e.g. `{"status": "pending", "instance_id": "<ocid1.instance...>"}`.
+- No tagged instance, and you have also checked the OCI console/work requests:
+  only then delete `state.json` to allow a fresh attempt.
 
 If capacity does not appear for days, that is normal. There is no guaranteed
 capacity or reservation from this automation. The GCP VM must remain active.

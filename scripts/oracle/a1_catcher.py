@@ -13,10 +13,18 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
+import uuid
 
 REGION = "ap-hyderabad-1"
 SHAPE = "VM.Standard.A1.Flex"
 UTC = dt.timezone.utc
+# Freeform tag written on every launch so an unrecorded outcome can be matched
+# back to the intent that issued it.
+INTENT_TAG = "a1-catcher-intent"
+# How long an unresolved intent may wait for ListInstances to show the
+# instance before the catcher halts for manual reconciliation.
+RECONCILE_GRACE = dt.timedelta(minutes=15)
+GONE = ("TERMINATED", "TERMINATING")
 
 
 def now() -> dt.datetime:
@@ -124,14 +132,28 @@ def notify(message: str) -> None:
 
 
 def save(path: Path, obj: dict) -> None:
+    # Durable write: the launch intent must survive a crash or power loss
+    # before the launch request is issued.
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(obj, sort_keys=True) + "\n", encoding="utf-8")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(obj, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
     os.chmod(temporary, 0o600)
     temporary.replace(path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
-def halt(state: Path, reason: str) -> int:
-    save(state, {"status": "halt", "reason": reason, "updated": stamp()})
+def halt(state: Path, reason: str, intent_id: str = "") -> int:
+    record = {"status": "halt", "reason": reason, "updated": stamp()}
+    if intent_id:
+        record["intent_id"] = intent_id
+    save(state, record)
     print(f"HALTED: {reason}", file=sys.stderr)
     notify(f"OCI A1 catcher HALTED: {reason}")
     return 1
@@ -142,6 +164,51 @@ def finish(state: Path, instance_id: str) -> int:
     print(f"SUCCESS: {instance_id}")
     notify(f"OCI A1 instance RUNNING in Hyderabad: {instance_id}")
     return 0
+
+
+def list_instances(config: dict) -> tuple[list | None, str]:
+    rc, response, err = cli(["compute", "instance", "list", "--compartment-id", config["compartment"], "--all"])
+    if rc:
+        return None, err
+    entries = response.get("data") if isinstance(response, dict) else None
+    if not isinstance(entries, list):
+        return None, "Instance list returned unexpected data"
+    return entries, ""
+
+
+def reconcile(config: dict, state: Path, recorded: dict) -> int:
+    """Resolve a launch whose outcome was never recorded. Never launches."""
+    intent = recorded.get("intent_id", "")
+    if not re.fullmatch(r"[0-9a-f]{32}", intent):
+        return halt(state, "Launch intent record is corrupt: manual reconciliation required")
+    expired = now() >= dt.datetime.fromisoformat(recorded["started"]) + RECONCILE_GRACE
+
+    def undetermined(reason: str) -> int:
+        if expired:
+            return halt(state, f"Launch outcome undetermined ({reason}): manual reconciliation required", intent)
+        print(f"Launch intent {intent} unresolved ({reason}); re-checking next cycle, no new launch")
+        return 0
+
+    entries, err = list_instances(config)
+    if entries is None:
+        return undetermined(f"instance list failed: {err}")
+    tagged = [item for item in entries if (item.get("freeform-tags") or {}).get(INTENT_TAG) == intent]
+    if len(tagged) > 1:
+        return halt(state, f"{len(tagged)} instances carry launch intent tag: manual reconciliation required", intent)
+    if tagged:
+        found = tagged[0]
+        current = found.get("lifecycle-state")
+        if current in GONE:
+            return halt(state, f"Instance for launch intent entered {current}", intent)
+        if not re.match(r"^ocid1\.instance\.", found.get("id", "")):
+            return halt(state, "Tagged instance has no valid OCID: manual reconciliation required", intent)
+        save(state, {"status": "pending", "instance_id": found["id"], "intent_id": intent, "updated": stamp()})
+        print(f"Reconciled launch intent to {found['id']}; verifying RUNNING on next timer cycle")
+        return 0
+    active = [item for item in entries if item.get("lifecycle-state") not in GONE]
+    if any(item.get("display-name") == config["name"] or item.get("shape") == SHAPE for item in active):
+        return halt(state, "Untagged A1 or same-name instance found while launch intent unresolved: manual reconciliation required", intent)
+    return undetermined("no instance carries the launch intent tag")
 
 
 def run(config: dict, state: Path) -> int:
@@ -169,13 +236,16 @@ def run(config: dict, state: Path) -> int:
                 return halt(state, f"Accepted instance entered {current}")
             print(f"Instance {instance_id} is {current}, no further launches")
             return 0
-    rc, response, err = cli(["compute", "instance", "list", "--compartment-id", config["compartment"], "--all"])
-    if rc:
+        if status == "launching":
+            # A previous run recorded intent but not the outcome (crash,
+            # restart or ambiguous API result): reconcile, never re-launch.
+            return reconcile(config, state, recorded)
+        if status != "cooldown":
+            fail(f"Unrecognised state status {status!r}; refusing to launch")
+    entries, err = list_instances(config)
+    if entries is None:
         return halt(state, f"Preflight instance list failed: {err}")
-    entries = response.get("data")
-    if not isinstance(entries, list):
-        return halt(state, "Instance list returned unexpected data; fail closed")
-    active = [item for item in entries if item.get("lifecycle-state") not in ("TERMINATED", "TERMINATING")]
+    active = [item for item in entries if item.get("lifecycle-state") not in GONE]
     named = [item for item in active if item.get("display-name") == config["name"]]
     if named:
         found = named[0]
@@ -184,26 +254,41 @@ def run(config: dict, state: Path) -> int:
         return 0
     if any(item.get("shape") == SHAPE for item in active):
         return halt(state, "Other active A1 instance in target compartment; re-check account quota")
+    intent = uuid.uuid4().hex
+    # Write-ahead: persist intent before the request leaves this host. If
+    # this save fails, the exception aborts the run before any launch.
+    record = {"status": "launching", "intent_id": intent, "display_name": config["name"],
+              "started": stamp(), "updated": stamp()}
+    save(state, record)
     args = ["compute", "instance", "launch", "--compartment-id", config["compartment"],
             "--availability-domain", config["ad"], "--display-name", config["name"],
             "--shape", SHAPE, "--shape-config", json.dumps({"ocpus": config["ocpus"], "memoryInGBs": config["memory"]}),
             "--image-id", config["image"], "--subnet-id", config["subnet"],
-            "--ssh-authorized-keys-file", config["key"], "--assign-public-ip", config["public_ip"]]
+            "--ssh-authorized-keys-file", config["key"], "--assign-public-ip", config["public_ip"],
+            "--freeform-tags", json.dumps({INTENT_TAG: intent})]
     rc, launched, err = cli(args)
     if rc:
         category = classify(err)
+        # Capacity and rate-limit responses are definitive rejections, so
+        # the intent can be cleared without risking a duplicate.
         if category == "capacity":
+            state.unlink()
             print("Out of host capacity; timer will retry next cycle")
             return 0
         if category == "rate-limit":
             save(state, {"status": "cooldown", "next_attempt": (now() + dt.timedelta(minutes=30)).isoformat(), "updated": stamp()})
             print("OCI rate-limited; waiting 30 minutes")
             return 0
-        return halt(state, f"Launch returned non-capacity or ambiguous error: {err}")
-    instance_id = (launched or {}).get("data", {}).get("id", "")
+        if "limitexceeded" in err.lower():
+            return halt(state, f"Launch rejected: {err}", intent)
+        print(f"Launch outcome uncertain ({err}); reconciling", file=sys.stderr)
+        return reconcile(config, state, record)
+    data = launched.get("data") if isinstance(launched, dict) else None
+    instance_id = data.get("id", "") if isinstance(data, dict) else ""
     if not re.match(r"^ocid1\.instance\.", instance_id):
-        return halt(state, "Launch accepted but instance ID missing: manual reconciliation required")
-    save(state, {"status": "pending", "instance_id": instance_id, "updated": stamp()})
+        print("Launch accepted but instance ID missing; reconciling", file=sys.stderr)
+        return reconcile(config, state, record)
+    save(state, {"status": "pending", "instance_id": instance_id, "intent_id": intent, "updated": stamp()})
     print(f"Launch accepted: {instance_id}; verifying RUNNING on next timer cycle")
     return 0
 
