@@ -1,0 +1,12 @@
+[Unit]
+Description=Retry OCI Hyderabad A1 capacity every five minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=5min
+RandomizedDelaySec=30s
+Persistent=false
+Unit=oracle-a1-catcher.service
+
+[Install]
+WantedBy=timers.target

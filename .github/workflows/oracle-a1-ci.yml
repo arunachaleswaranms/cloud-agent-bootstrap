@@ -1,0 +1,39 @@
+name: Oracle A1 automation checks
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/oracle/**'
+      - 'config/oracle/**'
+      - 'systemd/oracle-a1-catcher.*'
+      - 'tests/test_oracle_a1_catcher.py'
+      - '.github/workflows/oracle-a1-ci.yml'
+  push:
+    branches: [main, 'infra/**']
+    paths:
+      - 'scripts/oracle/**'
+      - 'config/oracle/**'
+      - 'systemd/oracle-a1-catcher.*'
+      - 'tests/test_oracle_a1_catcher.py'
+      - '.github/workflows/oracle-a1-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hermetic-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Compile Python catcher
+        run: python3 -m py_compile scripts/oracle/a1_catcher.py
+      - name: Run isolated tests (no OCI credentials or external calls)
+        run: python3 -m unittest discover -s tests -p 'test_oracle_a1_catcher.py' -v
+      - name: Verify example is disabled by default
+        run: |
+          grep -Fx 'OCI_ENABLE_LAUNCH=false' config/oracle/a1-catcher.env.example
+          grep -Fx 'OCI_ACK_ACCOUNT_QUOTA=false' config/oracle/a1-catcher.env.example
