@@ -101,6 +101,93 @@ class CatcherTests(CatcherBase):
             mocked.assert_not_called()
 
 
+class CliOutputTests(CatcherBase):
+    """OCI CLI output handling, mocked at the subprocess boundary."""
+
+    LIST = ["compute", "instance", "list", "--compartment-id", "ocid1.compartment.oc1..test", "--all"]
+    LAUNCH = ["compute", "instance", "launch", "--compartment-id", "ocid1.compartment.oc1..test"]
+    GET = ["compute", "instance", "get", "--instance-id", "ocid1.instance.oc1.test"]
+    WARNING = "WARNING: Permissions on /tmp/oci/config are too open.\n"
+
+    @staticmethod
+    def proc(returncode=0, stdout="", stderr=""):
+        return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def call(self, args, **result):
+        with mock.patch.object(catcher.subprocess, "run", return_value=self.proc(**result)):
+            return catcher.cli(args)
+
+    def test_successful_empty_list_is_zero_instances(self):
+        for stdout in ("", "\n", "  \n"):
+            with self.subTest(stdout=stdout):
+                self.assertEqual(self.call(self.LIST, stdout=stdout), (0, {"data": []}, ""))
+
+    def test_successful_empty_list_with_stderr_warning_is_zero_instances(self):
+        self.assertEqual(self.call(self.LIST, stderr=self.WARNING), (0, {"data": []}, ""))
+        with mock.patch.object(catcher.subprocess, "run", return_value=self.proc(stderr=self.WARNING)):
+            self.assertEqual(catcher.list_instances(self.config), ([], ""))
+
+    def test_non_empty_list_still_parsed(self):
+        listed = {"data": [{"id": "ocid1.instance.oc1.test"}]}
+        self.assertEqual(self.call(self.LIST, stdout=json.dumps(listed)), (0, listed, ""))
+
+    def test_empty_launch_or_get_output_stays_unknown(self):
+        for args in (self.LAUNCH, self.GET):
+            with self.subTest(command=args[2]):
+                rc, data, err = self.call(args, stderr=self.WARNING)
+                self.assertEqual(rc, 99)
+                self.assertIsNone(data)
+                self.assertIn("UnknownOutcome", err)
+
+    def test_invalid_list_json_stays_unknown(self):
+        for stdout in ("not json", "{\"data\": [", "WARNING: something"):
+            with self.subTest(stdout=stdout):
+                rc, data, err = self.call(self.LIST, stdout=stdout)
+                self.assertEqual(rc, 99)
+                self.assertIsNone(data)
+                self.assertIn("UnknownOutcome", err)
+
+    def test_failed_list_with_empty_stdout_is_not_normalized(self):
+        for stderr in ("", self.WARNING, "ServiceError: connection timed out"):
+            with self.subTest(stderr=stderr):
+                rc, data, err = self.call(self.LIST, returncode=1, stderr=stderr)
+                self.assertEqual(rc, 1)
+                self.assertIsNone(data)
+                self.assertEqual(catcher.classify(err), "halt")
+                with mock.patch.object(catcher.subprocess, "run", return_value=self.proc(returncode=1, stderr=stderr)):
+                    self.assertEqual(catcher.list_instances(self.config)[0], None)
+
+    def test_list_timeout_is_unknown(self):
+        with mock.patch.object(catcher.subprocess, "run", side_effect=catcher.subprocess.TimeoutExpired("oci", 130)):
+            self.assertEqual(catcher.cli(self.LIST), (99, None, "UnknownOutcome: TimeoutExpired"))
+
+    def test_preflight_empty_list_proceeds_to_single_launch(self):
+        def fake(command, **kwargs):
+            if "list" in command:
+                return self.proc(stderr=self.WARNING)
+            return self.proc(stdout=json.dumps({"data": {"id": "ocid1.instance.oc1.test"}}))
+
+        with mock.patch.object(catcher.subprocess, "run", side_effect=fake) as proc:
+            self.assertEqual(catcher.run(self.config, self.state), 0)
+        launched = [c for c in proc.call_args_list if "launch" in c.args[0]]
+        self.assertEqual(len(launched), 1)
+        self.assertEqual(json.loads(self.state.read_text())["status"], "pending")
+
+    def test_empty_launch_output_reconciles_instead_of_succeeding(self):
+        with mock.patch.object(catcher.subprocess, "run", return_value=self.proc(stderr=self.WARNING)) as proc:
+            self.assertEqual(catcher.run(self.config, self.state), 0)
+        launched = [c for c in proc.call_args_list if "launch" in c.args[0]]
+        self.assertEqual(len(launched), 1)
+        self.assertEqual(json.loads(self.state.read_text())["status"], "launching")
+
+    def test_empty_get_output_halts_pending_verification(self):
+        catcher.save(self.state, {"status": "pending", "instance_id": "ocid1.instance.oc1.test"})
+        with mock.patch.object(catcher.subprocess, "run", return_value=self.proc()), \
+                mock.patch.object(catcher, "notify"):
+            self.assertEqual(catcher.run(self.config, self.state), 1)
+        self.assertEqual(json.loads(self.state.read_text())["status"], "halt")
+
+
 class Crash(BaseException):
     """Stands in for SIGKILL/power loss mid-request; bypasses except clauses."""
 
